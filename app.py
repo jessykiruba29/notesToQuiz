@@ -72,7 +72,8 @@ def generate_distractors(context, correct_answer, num_distractors=3):
     return list(distractors)[:num_distractors]
 
 def generate_questions(text, num_questions=10):
-    qg = pipeline("text2text-generation", model="valhalla/t5-base-qg-hl")
+    qg = pipeline("text2text-generation", model="mrm8488/t5-small-finetuned-qg")
+
     sentences = [s.strip() for s in text.split('.') if s.strip()]
     questions = []
     for i in range(min(num_questions, len(sentences))):
