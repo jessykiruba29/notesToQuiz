@@ -33,6 +33,8 @@ LANGUAGES = {
     'Bengali': 'Helsinki-NLP/opus-mt-en-bn',
 }
 
+import functools
+@functools.lru_cache(maxsize=8)
 def get_translation_pipeline(target_lang):
     if target_lang == 'English':
         return None
@@ -59,7 +61,6 @@ def load_text_from_pdf(pdf_file):
     return text
 
 
-# --- Smarter Distractor Generation ---
 # --- Smarter Distractor Generation (Streamlit Cloud compatible) ---
 def generate_distractors(context, correct_answer, num_distractors=3):
     """Simple distractor generator using string shuffling (offline, no extra models needed)."""
@@ -80,29 +81,48 @@ def generate_distractors(context, correct_answer, num_distractors=3):
 
 # --- T5 Question Generation (Streamlit Cloud compatible) ---
 
-# --- Local T5 Model Loading for Streamlit Cloud ---
+
+# --- Local or Fallback T5 Model Loading ---
 import os
 T5_LOCAL_PATH = "./t5-small"
+FALLBACK_MODEL = "google/flan-t5-small"
 
+
+# Returns (tokenizer, model, used_fallback: bool)
+
+# --- Safe T5 Model Loading ---
 @st.cache_resource(show_spinner=False)
 def get_t5_model():
-    if not os.path.exists(T5_LOCAL_PATH):
-        raise FileNotFoundError(
-            f"T5 model folder '{T5_LOCAL_PATH}' not found. "
-            "Please download 't5-small' and place it in this folder. "
-            "See README for instructions."
-        )
-    tokenizer = T5Tokenizer.from_pretrained(T5_LOCAL_PATH)
-    model = T5ForConditionalGeneration.from_pretrained(T5_LOCAL_PATH)
-    return tokenizer, model
+    """Load T5 model safely, using local if available, else fallback. Returns (tokenizer, model, used_fallback)."""
+    try:
+        if os.path.exists(T5_LOCAL_PATH):
+            tokenizer = T5Tokenizer.from_pretrained(T5_LOCAL_PATH)
+            model = T5ForConditionalGeneration.from_pretrained(T5_LOCAL_PATH)
+            return tokenizer, model, False
+        else:
+            tokenizer = T5Tokenizer.from_pretrained(FALLBACK_MODEL)
+            model = T5ForConditionalGeneration.from_pretrained(FALLBACK_MODEL)
+            return tokenizer, model, True
+    except Exception as e:
+        st.error(f"⚠️ Could not load T5 model: {e}")
+        return None, None, False  # fallback failed
+
+
+
 
 def safe_generate_question(text):
-    tokenizer, model = get_t5_model()
-    input_text = f"generate question: {text}"
-    inputs = tokenizer(input_text, return_tensors="pt", truncation=True)
-    with torch.no_grad():
-        outputs = model.generate(**inputs, max_length=64)
-    return tokenizer.decode(outputs[0], skip_special_tokens=True)
+    """Generate a question from text safely. Returns warning if model is not loaded."""
+    tokenizer, model, _ = get_t5_model()
+    if tokenizer is None or model is None:
+        return "⚠️ Question generation unavailable"
+    try:
+        input_text = f"generate question: {text}"
+        inputs = tokenizer(input_text, return_tensors="pt", truncation=True)
+        with torch.no_grad():
+            outputs = model.generate(**inputs, max_length=64)
+        return tokenizer.decode(outputs[0], skip_special_tokens=True)
+    except Exception as e:
+        return f"⚠️ Error generating question: {e}"
 
 def generate_questions(text, num_questions=10):
     sentences = [s.strip() for s in text.split('.') if s.strip()]
@@ -126,26 +146,144 @@ def generate_questions(text, num_questions=10):
 
 
 
+
 def display_question(q, idx, lang='English', progress=None, total=None, feedback=None):
-    with st.container():
-        st.markdown(f"<div style='margin-bottom:0.5em; font-size:1.3em; font-weight:bold;'>📝 Q{idx+1}: {q['question']}</div>", unsafe_allow_html=True)
-        if progress is not None and total is not None:
-            st.markdown(f"<div style='margin-bottom:0.5em; font-size:1.1em;'>Progress: <b>Question {progress} of {total}</b></div>", unsafe_allow_html=True)
-            st.progress(progress / total)
-        col1, col2, col3 = st.columns([5,1,1])
-        with col2:
-            if st.button("🔊", key=f"tts_{idx}"):
-                speak(q['question'])
-        with col3:
-            if st.button("⭐", key=f"bm_icon_{idx}"):
-                save_bookmark(q)
-        st.markdown("<div style='margin-top:0.5em'></div>", unsafe_allow_html=True)
-        user_answer = st.radio("<b>Choose one:</b>", q['options'], key=f"q_{idx}", format_func=lambda x: x, label_visibility="visible")
-        if feedback == 'correct':
-            st.markdown("<div style='color: #2ecc40; font-size:1.1em; font-weight:bold; margin-top:0.5em;'>✅ Correct! 🎉</div>", unsafe_allow_html=True)
-        elif feedback == 'wrong':
-            st.markdown(f"<div style='color: #e74c3c; font-size:1.1em; font-weight:bold; margin-top:0.5em;'>❌ Wrong!<br>Correct: <b>{q['answer']}</b></div>", unsafe_allow_html=True)
-        return user_answer
+    # q: question dict, idx: index in quiz, lang: language, progress/total: for progress bar, feedback: (None, True, False)
+    if 'selected_option' not in st.session_state:
+        st.session_state['selected_option'] = None
+    if 'answer_submitted' not in st.session_state:
+        st.session_state['answer_submitted'] = False
+    if 'show_next' not in st.session_state:
+        st.session_state['show_next'] = False
+
+    st.markdown(f"<div style='margin-bottom:0.5em; font-size:1.3em; font-weight:bold;'>📝 Q{idx+1}: {q['question']}</div>", unsafe_allow_html=True)
+    if progress is not None and total is not None:
+        st.markdown(f"<div style='margin-bottom:0.5em; font-size:1.1em;'>Progress: <b>Question {progress} of {total}</b></div>", unsafe_allow_html=True)
+        st.progress(progress / total)
+
+    sel_key = f'selected_option_{idx}'
+    sub_key = f'answer_submitted_{idx}'
+    next_key = f'show_next_{idx}'
+    if sel_key not in st.session_state:
+        st.session_state[sel_key] = None
+    if sub_key not in st.session_state:
+        st.session_state[sub_key] = False
+    if next_key not in st.session_state:
+        st.session_state[next_key] = False
+
+    col1, col2 = st.columns([8,1])
+    with col2:
+        if st.button('🔊 Play Question', key=f'play_{idx}'):
+            speak(q['question'])
+
+    st.session_state[sel_key] = st.radio(
+        "Select your answer:",
+        q['options'],
+        index=0 if st.session_state.get(sel_key) is None else q['options'].index(st.session_state[sel_key]),
+        key=f"radio_{idx}"
+    )
+
+    submit = st.button("Submit Answer", key=f"submit_{idx}")
+    nextq = st.button("Next Question", key=f"next_{idx}")
+
+    if submit and not st.session_state[sub_key]:
+        st.session_state[sub_key] = True
+        st.session_state[next_key] = True
+        if st.session_state[sel_key] == q['answer']:
+            st.success("✅ Correct!")
+            return True
+        else:
+            st.error(f"❌ Wrong! Correct answer: {q['answer']}")
+            return False
+    elif st.session_state[sub_key]:
+        if st.session_state[sel_key] == q['answer']:
+            st.success("✅ Correct!")
+        else:
+            st.error(f"❌ Wrong! Correct answer: {q['answer']}")
+    if nextq and st.session_state[next_key]:
+        st.session_state[sub_key] = False
+        st.session_state[next_key] = False
+        st.session_state[sel_key] = None
+        return 'next'
+    return None
+# --- MAIN APP ---
+def main():
+    st.set_page_config(page_title="AI Notes-to-Quiz Generator", layout="wide")
+
+    st.title("AI Notes-to-Quiz Generator 📝🤖")
+    st.markdown("Generate quizzes from your notes or PDFs. Adaptive, multilingual, and Streamlit Cloud compatible!")
+
+    # Model warning in sidebar
+    _, _, used_fallback = get_t5_model()
+    with st.sidebar:
+        st.header("Settings")
+        if used_fallback:
+            st.warning("⚠️ Using fallback T5 model from HuggingFace Hub. For best performance, upload the T5 model folder as ./t5-small.")
+        lang = st.selectbox("Quiz Language", list(LANGUAGES.keys()), index=0)
+
+    # Tabs
+    tabs = st.tabs(["Quiz", "Flashcards", "Analytics"])
+
+    # --- Quiz Tab ---
+    with tabs[0]:
+        st.subheader("Quiz")
+        uploaded_file = st.file_uploader("Upload PDF Notes", type=["pdf"])
+        if uploaded_file:
+            text = load_text_from_pdf(uploaded_file)
+            if 'questions' not in st.session_state:
+                st.session_state['questions'] = generate_questions(text, num_questions=10)
+                st.session_state['current_q'] = 0
+                st.session_state['answers'] = []
+            questions = st.session_state['questions']
+            current_q = st.session_state['current_q']
+            q = questions[current_q]
+            # Translation
+            translation_fn = get_translation_pipeline(lang)
+            if lang != 'English' and translation_fn:
+                q = translate_question(q, lang, translation_fn)
+            feedback = None
+            result = display_question(q, current_q, lang, progress=current_q+1, total=len(questions))
+            if result is True or result is False:
+                st.session_state['answers'].append((q, st.session_state['selected_option'], result))
+                if not result:
+                    questions[current_q]['wrong_count'] += 1
+            if result == 'next' and current_q < len(questions)-1:
+                st.session_state['current_q'] += 1
+                st.experimental_rerun()
+            elif result == 'next' and current_q == len(questions)-1:
+                st.success("Quiz complete! View your flashcards and analytics.")
+        else:
+            st.info("Upload a PDF to start the quiz.")
+
+    # --- Flashcards Tab ---
+    with tabs[1]:
+        show_flashcards()
+
+    # --- Analytics Tab ---
+    with tabs[2]:
+        show_analytics()
+
+
+# --- Analytics Function ---
+def show_analytics():
+    st.markdown("<h2 style='margin-bottom:1em;'>📊 Analytics</h2>", unsafe_allow_html=True)
+    answers = st.session_state.get('answers', [])
+    if not answers:
+        st.info("No quiz attempts yet.")
+        return
+    total = len(answers)
+    correct = sum(1 for a in answers if a[2])
+    wrong = total - correct
+    st.write(f"Total Questions Answered: {total}")
+    st.write(f"Correct: {correct}")
+    st.write(f"Wrong: {wrong}")
+    st.progress(correct/total)
+
+
+# --- Run App ---
+if __name__ == "__main__":
+    main()
+
 
 def save_bookmark(question):
     if 'bookmarks' not in st.session_state:
@@ -158,6 +296,7 @@ def save_bookmark(question):
 
 
 
+
 def show_flashcards():
     st.markdown("<h2 style='margin-bottom:1em;'>⭐ Flashcards</h2>", unsafe_allow_html=True)
     bookmarks = st.session_state.get('bookmarks', [])
@@ -165,150 +304,31 @@ def show_flashcards():
     if not bookmarks:
         st.info("No bookmarks yet.")
         return
+    import hashlib
     for i, q in enumerate(bookmarks):
+        q_hash = hashlib.md5(q['question'].encode()).hexdigest()[:8]
+        show_key = f'show_answer_{i}_{q_hash}'
+        remove_key = f'remove_bm_{i}_{q_hash}'
+        if show_key not in st.session_state:
+            st.session_state[show_key] = False
         with st.container():
             st.markdown(f"<div style='background:#f8f9fa; border-radius:10px; padding:1em; margin-bottom:1em; box-shadow:0 2px 8px #eee;'>", unsafe_allow_html=True)
             st.markdown(f"<b>📝 Q{i+1}:</b> {q['question']}", unsafe_allow_html=True)
             col1, col2 = st.columns([3,1])
             with col1:
-                if st.button(f"Show Answer {i+1}", key=f"show_ans_{i}"):
+                st.session_state[show_key] = st.checkbox(f"Show Answer {i+1}", value=st.session_state[show_key], key=f"cb_{show_key}")
+                if st.session_state[show_key]:
                     st.markdown(f"<b>Answer:</b> <span style='color:#2980b9; font-size:1.1em'>{q['answer']}</span>", unsafe_allow_html=True)
                     user_attempts = [a for a in answers if a[0]['question'] == q['question']]
                     if user_attempts:
                         last_attempt = user_attempts[-1]
                         if last_attempt[2]:
-                            st.markdown("<span style='color:#2ecc40; font-weight:bold;'>✅ You answered this correctly in the quiz.</span>", unsafe_allow_html=True)
+                            st.markdown("<span style='color:#2ecc40; font-weight:bold;'>✅ Correct in quiz</span>", unsafe_allow_html=True)
                         else:
-                            st.markdown("<span style='color:#e74c3c; font-weight:bold;'>❌ You answered this incorrectly in the quiz.</span>", unsafe_allow_html=True)
+                            st.markdown("<span style='color:#e74c3c; font-weight:bold;'>❌ Incorrect in quiz</span>", unsafe_allow_html=True)
             with col2:
-                if st.button(f"Remove", key=f"remove_bm_{i}"):
+                if st.button(f"Remove", key=remove_key):
                     st.session_state['bookmarks'].remove(q)
+                    st.session_state[show_key] = False
                     st.experimental_rerun()
-            st.markdown("</div>", unsafe_allow_html=True)
 
-def show_analytics():
-    st.subheader("Quiz Analytics")
-    answers = st.session_state.get('answers', [])
-    bookmarks = st.session_state.get('bookmarks', [])
-    repeat_queue = st.session_state.get('repeat_queue', [])
-    total = len(answers)
-    correct = sum(1 for a in answers if a[2])
-    percent = (correct / total * 100) if total else 0
-    st.metric("Final Score", f"{correct} / {total}")
-    st.metric("Percentage", f"{percent:.1f}%")
-    st.metric("Bookmarked Questions", len(bookmarks))
-    # Most-wrong questions
-    wrongs = [a for a in answers if not a[2]]
-    if wrongs:
-        st.markdown("**Most Wrong Questions:**")
-        for i, (q, user_ans, _) in enumerate(wrongs):
-            st.markdown(f"- {q['question']} (Your answer: {user_ans}, Correct: {q['answer']})")
-    else:
-        st.info("No wrong answers!")
-
-
-def main():
-    st.set_page_config(page_title="recallai", layout="centered")
-    st.title("RecallAI: Notes-to-Quiz Generator 🧠")
-
-    # Sidebar language selector
-    st.sidebar.header("🌐 Language")
-    lang = st.sidebar.selectbox("Select language", list(LANGUAGES.keys()), index=0)
-    translation_fn = get_translation_pipeline(lang)
-
-    # Session state init
-    for key, default in [
-        ('score', 0),
-        ('current_q', 0),
-        ('questions', []),
-        ('answers', []),
-        ('bookmarks', []),
-        ('repeat_queue', []),
-        ('quiz_finished', False)
-    ]:
-        if key not in st.session_state:
-            st.session_state[key] = default
-
-    tabs = st.tabs(["Quiz", "Flashcards", "Analytics"])
-
-    # --- Quiz Tab ---
-    with tabs[0]:
-        uploaded = st.file_uploader("Upload PDF notes", type=["pdf"])
-        if uploaded and st.button("Generate Quiz"):
-            text = load_text_from_pdf(uploaded)
-            st.session_state['questions'] = generate_questions(text, num_questions=10)
-            st.session_state['current_q'] = 0
-            st.session_state['score'] = 0
-            st.session_state['answers'] = []
-            st.session_state['repeat_queue'] = []
-            st.session_state['quiz_finished'] = False
-
-
-        questions = st.session_state.get('questions', [])
-        idx = st.session_state.get('current_q', 0)
-        repeat_queue = st.session_state.get('repeat_queue', [])
-        quiz_finished = st.session_state.get('quiz_finished', False)
-
-
-        # Adaptive repeat: sort repeat_queue by wrong_count descending
-        if repeat_queue:
-            repeat_queue.sort(key=lambda q: -q.get('wrong_count', 0))
-
-        # Determine which question to show: repeat queue has priority
-        total_questions = len(questions)
-        answered = idx
-        if questions and not quiz_finished:
-            if repeat_queue:
-                q = repeat_queue[0]
-                is_repeat = True
-                progress = answered
-            elif idx < total_questions:
-                q = questions[idx]
-                is_repeat = False
-                progress = idx + 1
-            else:
-                st.markdown("<div style='color:#2980b9; font-size:1.2em; font-weight:bold; margin-top:1em;'>🎉 Quiz complete! Your score: {}/{} </div>".format(st.session_state['score'], len(questions)), unsafe_allow_html=True)
-                st.session_state['quiz_finished'] = True
-                st.stop()
-
-            # Translate question/options if needed
-            q_disp = translate_question(q, lang, translation_fn) if lang != 'English' else q
-            # Feedback logic
-            feedback = None
-            if 'last_feedback' in st.session_state:
-                feedback = st.session_state.pop('last_feedback')
-            user_answer = display_question(q_disp, idx if not is_repeat else f"repeat_{idx}", lang=lang, progress=progress, total=total_questions, feedback=feedback)
-            if st.button("Submit Answer", key=f"submit_{idx}"):
-                correct = user_answer == q_disp['answer']
-                st.session_state['answers'].append((q, user_answer, correct))
-                if correct:
-                    st.session_state['score'] += 1
-                    if is_repeat:
-                        st.session_state['repeat_queue'].pop(0)
-                    st.session_state['last_feedback'] = 'correct'
-                else:
-                    q['wrong_count'] = q.get('wrong_count', 0) + 1
-                    if not is_repeat and q not in st.session_state['repeat_queue']:
-                        st.session_state['repeat_queue'].append(q)
-                    st.session_state['last_feedback'] = 'wrong'
-                st.experimental_rerun()
-            if st.button("Next Question", key=f"next_{idx}"):
-                if not is_repeat:
-                    st.session_state['current_q'] += 1
-                elif is_repeat:
-                    pass
-                st.experimental_rerun()
-
-        elif questions and quiz_finished:
-            st.markdown("<div style='color:#2980b9; font-size:1.2em; font-weight:bold; margin-top:1em;'>🎉 Quiz complete! Your score: {}/{} </div>".format(st.session_state['score'], len(questions)), unsafe_allow_html=True)
-
-    # --- Flashcards Tab ---
-    with tabs[1]:
-        show_flashcards()
-
-    # --- Analytics Tab ---
-    with tabs[2]:
-        show_analytics()
-
-if __name__ == "__main__":
-    main()
