@@ -85,18 +85,14 @@ def safe_generate_question(text):
     except Exception as e:
         return f"⚠️ Error generating question: {e}"
 
-def generate_distractors(context, correct_answer, num_distractors=3):
-    words = correct_answer.split()
+def generate_distractors(correct_answer, num_distractors=3):
+    # Simple semantic distractors: add slight variations
     distractors = set()
     attempts = 0
     while len(distractors) < num_distractors and attempts < 20:
-        random.shuffle(words)
-        fake_ans = " ".join(words)
-        if fake_ans != correct_answer and fake_ans.strip():
-            distractors.add(fake_ans)
+        fake_ans = correct_answer + " " + random.choice(["option", "example", "choice", "item"])
+        distractors.add(fake_ans)
         attempts += 1
-    while len(distractors) < num_distractors:
-        distractors.add(f"{correct_answer} {random.choice(['X','Y','Z'])}")
     return list(distractors)[:num_distractors]
 
 def generate_questions(text, num_questions=10):
@@ -104,13 +100,13 @@ def generate_questions(text, num_questions=10):
     questions = []
     for i in range(min(num_questions, len(sentences))):
         context = sentences[i]
-        out = safe_generate_question(context)
-        correct = out
-        distractors = generate_distractors(context, correct)
+        question_text = safe_generate_question(context)
+        correct = question_text
+        distractors = generate_distractors(correct)
         options = [correct] + distractors
         random.shuffle(options)
         questions.append({
-            'question': out,
+            'question': question_text,
             'options': options,
             'answer': correct,
             'context': context,
@@ -164,13 +160,6 @@ def show_flashcards():
                 st.session_state[show_key] = st.checkbox(f"Show Answer {i+1}", value=st.session_state[show_key], key=f"cb_{show_key}")
                 if st.session_state[show_key]:
                     st.markdown(f"<b>Answer:</b> <span style='color:#2980b9; font-size:1.1em'>{q['answer']}</span>", unsafe_allow_html=True)
-                    user_attempts = [a for a in answers if a[0]['question'] == q['question']]
-                    if user_attempts:
-                        last_attempt = user_attempts[-1]
-                        if last_attempt[2]:
-                            st.markdown("<span style='color:#2ecc40; font-weight:bold;'>✅ Correct in quiz</span>", unsafe_allow_html=True)
-                        else:
-                            st.markdown("<span style='color:#e74c3c; font-weight:bold;'>❌ Incorrect in quiz</span>", unsafe_allow_html=True)
             with col2:
                 if st.button(f"Remove", key=remove_key):
                     st.session_state['bookmarks'].remove(q)
@@ -205,6 +194,9 @@ def display_question(q, idx, lang='English', progress=None, total=None):
         index=0 if st.session_state.get(sel_key) is None else q['options'].index(st.session_state[sel_key]),
         key=f"radio_{idx}"
     )
+
+    if st.button("⭐ Bookmark Question", key=f"bookmark_{idx}"):
+        save_bookmark(q)
 
     submit = st.button("Submit Answer", key=f"submit_{idx}")
     nextq = st.button("Next Question", key=f"next_{idx}")
