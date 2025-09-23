@@ -79,10 +79,21 @@ def generate_distractors(context, correct_answer, num_distractors=3):
 
 
 # --- T5 Question Generation (Streamlit Cloud compatible) ---
+
+# --- Local T5 Model Loading for Streamlit Cloud ---
+import os
+T5_LOCAL_PATH = "./t5-small"
+
 @st.cache_resource(show_spinner=False)
 def get_t5_model():
-    tokenizer = T5Tokenizer.from_pretrained("t5-small")
-    model = T5ForConditionalGeneration.from_pretrained("t5-small")
+    if not os.path.exists(T5_LOCAL_PATH):
+        raise FileNotFoundError(
+            f"T5 model folder '{T5_LOCAL_PATH}' not found. "
+            "Please download 't5-small' and place it in this folder. "
+            "See README for instructions."
+        )
+    tokenizer = T5Tokenizer.from_pretrained(T5_LOCAL_PATH)
+    model = T5ForConditionalGeneration.from_pretrained(T5_LOCAL_PATH)
     return tokenizer, model
 
 def safe_generate_question(text):
