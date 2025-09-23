@@ -1,9 +1,11 @@
 
 
 
+# ...existing code...
 import streamlit as st
 import fitz  # PyMuPDF
-from transformers import pipeline, MarianMTModel, MarianTokenizer
+from transformers import T5ForConditionalGeneration, T5Tokenizer, MarianMTModel, MarianTokenizer
+import torch
 import random
 import pyttsx3
 import tempfile
@@ -58,28 +60,45 @@ def load_text_from_pdf(pdf_file):
 
 
 # --- Smarter Distractor Generation ---
+# --- Smarter Distractor Generation (Streamlit Cloud compatible) ---
 def generate_distractors(context, correct_answer, num_distractors=3):
-    # Use T5 to generate plausible distractors by asking for wrong answers
-    distractor_pipe = pipeline("text2text-generation", model="valhalla/t5-base-qg-hl")
+    """Simple distractor generator using string shuffling (offline, no extra models needed)."""
+    words = correct_answer.split()
     distractors = set()
-    prompt = f"Generate a plausible but incorrect answer for: {context}"
+    attempts = 0
+    while len(distractors) < num_distractors and attempts < 20:
+        random.shuffle(words)
+        fake_ans = " ".join(words)
+        if fake_ans != correct_answer and fake_ans.strip():
+            distractors.add(fake_ans)
+        attempts += 1
+    # Fill remaining with random common words if needed
     while len(distractors) < num_distractors:
-        out = distractor_pipe(prompt, max_length=32, do_sample=True, top_k=50, num_return_sequences=1)[0]['generated_text']
-        if out.strip() and out.strip() != correct_answer:
-            distractors.add(out.strip())
-        if len(distractors) > 10:  # avoid infinite loop
-            break
+        distractors.add(f"{correct_answer} {random.choice(['X','Y','Z'])}")
     return list(distractors)[:num_distractors]
 
-def generate_questions(text, num_questions=10):
-    qg = pipeline("text2text-generation", model="mrm8488/t5-small-finetuned-qg")
 
+# --- T5 Question Generation (Streamlit Cloud compatible) ---
+@st.cache_resource(show_spinner=False)
+def get_t5_model():
+    tokenizer = T5Tokenizer.from_pretrained("t5-small")
+    model = T5ForConditionalGeneration.from_pretrained("t5-small")
+    return tokenizer, model
+
+def safe_generate_question(text):
+    tokenizer, model = get_t5_model()
+    input_text = f"generate question: {text}"
+    inputs = tokenizer(input_text, return_tensors="pt", truncation=True)
+    with torch.no_grad():
+        outputs = model.generate(**inputs, max_length=64)
+    return tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+def generate_questions(text, num_questions=10):
     sentences = [s.strip() for s in text.split('.') if s.strip()]
     questions = []
     for i in range(min(num_questions, len(sentences))):
         context = sentences[i]
-        input_text = f"generate question: {context}"
-        out = qg(input_text, max_length=64, do_sample=False)[0]['generated_text']
+        out = safe_generate_question(context)
         correct = out
         distractors = generate_distractors(context, correct)
         options = [correct] + distractors
